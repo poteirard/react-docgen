@@ -7,7 +7,8 @@
  * @flow
  */
 
-import doctrine from 'doctrine';
+import { parse as typeParse } from 'jsdoctypeparser';
+import commentParse from 'comment-parser';
 
 type JsDoc = {
   description: ?string,
@@ -28,56 +29,66 @@ function getType(tagType) {
     return null;
   }
 
-  const { type, name, expression, elements, applications } = tagType;
+  const { type, name, left, right, entries, subject, objects } = tagType?.type
+    ? tagType
+    : typeParse(tagType);
 
+  // Types: https://github.com/jsdoctypeparser/jsdoctypeparser#ast-specifications
   switch (type) {
-    case 'NameExpression':
+    case 'NAME':
       // {a}
       return { name };
-    case 'UnionType':
+    case 'UNION':
       // {a|b}
+      // eslint-disable-next-line no-case-declarations
+      const parsedElements = [left, right].map(getType);
       return {
         name: 'union',
-        elements: elements.map(element => getType(element)),
+        elements: parsedElements,
       };
-    case 'AllLiteral':
+    case 'OPTIONAL':
+      // {string=}
+      return { name: tagType.replace(/=$/, '') };
+    case 'ANY':
       // {*}
       return { name: 'mixed' };
-    case 'TypeApplication':
+    case 'GENERIC':
       // {Array<string>} or {string[]}
       return {
-        name: expression.name,
-        elements: applications.map(element => getType(element)),
+        name: subject.name,
+        elements: objects.map(getType),
       };
-    case 'ArrayType':
+    case 'TUPLE':
       // {[number, string]}
       return {
         name: 'tuple',
-        elements: elements.map(element => getType(element)),
+        elements: entries.map(getType),
       };
     default: {
-      const typeName = name ? name : expression ? expression.name : null;
-      if (typeName) {
-        return { name: typeName };
-      } else {
-        return null;
-      }
+      return null;
     }
   }
 }
 
 function getOptional(tag): boolean {
-  return !!(tag.type && tag.type.type && tag.type.type === 'OptionalType');
+  return !!(
+    tag.type &&
+    (tag.optional || typeParse(tag.type).type === 'OPTIONAL')
+  );
 }
 
 // Add jsdoc @return description.
 function getReturnsJsDoc(jsDoc) {
   const returnTag = jsDoc.tags.find(
-    tag => tag.title === 'return' || tag.title === 'returns',
+    tag => tag.tag === 'returns' || tag.tag === 'return',
   );
   if (returnTag) {
+    const { type, description: returnTagDescription, source, tag } = returnTag;
+    const description = type
+      ? returnTagDescription || null
+      : source.replace(`@${tag} `, '') || null;
     return {
-      description: returnTag.description,
+      description,
       type: getType(returnTag.type),
     };
   }
@@ -90,23 +101,22 @@ function getParamsJsDoc(jsDoc) {
     return [];
   }
   return jsDoc.tags
-    .filter(tag => tag.title === 'param')
-    .map(tag => {
-      return {
-        name: tag.name,
-        description: tag.description,
-        type: getType(tag.type),
-        optional: getOptional(tag),
-      };
-    });
+    .filter(tag => tag.tag === 'param')
+    .map(tag => ({
+      name: tag.name,
+      description: tag.description || null,
+      type: getType(tag.type),
+      optional: getOptional(tag),
+    }));
 }
 
 export default function parseJsDoc(docblock: string): JsDoc {
-  const jsDoc = doctrine.parse(docblock);
+  const jsDoc = commentParse(`/** ${docblock} */`);
+  const firstDoc = jsDoc.length ? jsDoc[0] : undefined;
 
   return {
-    description: jsDoc.description || null,
-    params: getParamsJsDoc(jsDoc),
-    returns: getReturnsJsDoc(jsDoc),
+    description: firstDoc?.description || null,
+    params: getParamsJsDoc(firstDoc),
+    returns: getReturnsJsDoc(firstDoc),
   };
 }
